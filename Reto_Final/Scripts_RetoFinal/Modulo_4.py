@@ -134,12 +134,11 @@ def construir_vistas_gold(con):
     tablas = tablas_existentes(con)
     cur = con.cursor()
 
-    # -- P1: gold_pib_tendencia (CORREGIDO ULTRA SEGURO) ------------------
+    # -- P1: gold_pib_tendencia -------------------------------------------
     if 'fact_macro_anual' in tablas:
         cols = columnas(con, 'fact_macro_anual')
         col_var = 'variacion_anual_pib' if 'variacion_anual_pib' in cols else 'variacion_pib_pct'
 
-        # Escáner inteligente de columnas de dinero vs índice
         if 'pib_real_musd' in cols:
             col_pib = 'pib_real_musd'
         elif 'pib_real' in cols:
@@ -164,9 +163,9 @@ def construir_vistas_gold(con):
             WHERE anio IS NOT NULL
             ORDER BY anio
         """)
-        print(f"  gold_pib_tendencia  -> P1 (Columna detectada y usada: '{col_pib}')")
+        print(f"  gold_pib_tendencia  -> P1 (Columna detectada: '{col_pib}')")
 
-    # -- P1 apoyo / P2: gold_petroleo_30dias ------------------------------
+    # -- P1/P2: gold_petroleo_30dias --------------------------------------
     if 'fact_petroleo_diario' in tablas:
         cols = columnas(con, 'fact_petroleo_diario')
         col_p = 'precio_wti' if 'precio_wti' in cols else cols[-1]
@@ -183,7 +182,7 @@ def construir_vistas_gold(con):
             WHERE fecha IS NOT NULL
             ORDER BY fecha
         """)
-        print("  gold_petroleo_30dias -> P1/P2 (coyuntura)")
+        print("  gold_petroleo_30dias -> P1/P2")
 
     # -- P2: gold_empleo_tendencia ----------------------------------------
     if 'fact_empleo_enemdu' in tablas:
@@ -208,28 +207,70 @@ def construir_vistas_gold(con):
             """)
             print("  gold_empleo_tendencia -> P2")
 
+    # -- P2: gold_empleo_ciiu (FORZADO CON SUPERCIAS) ---------------------
+    if 'fact_directorio_companias' in tablas:
+        cols_dir = columnas(con, 'fact_directorio_companias')
+
+        # Buscamos cualquier columna que hable del sector/actividad/ciiu
+        col_rama = next((c for c in cols_dir if
+                         'ciiu' in c.lower() or 'actividad' in c.lower() or 'rama' in c.lower() or 'sector' in c.lower()),
+                        None)
+
+        # Si la tabla tiene empleados los sumamos, si no, contamos las empresas como proxy de empleo
+        col_empleo = next((c for c in cols_dir if 'emplead' in c.lower() or 'personal' in c.lower()), None)
+
+        if col_rama:
+            cur.execute("DROP VIEW IF EXISTS gold_empleo_ciiu")
+            if col_empleo:
+                cur.execute(f"""
+                    CREATE VIEW gold_empleo_ciiu AS
+                    SELECT 
+                        {col_rama} AS rama_ciiu,
+                        SUM(CAST({col_empleo} AS FLOAT)) AS total_empleos
+                    FROM fact_directorio_companias
+                    WHERE {col_rama} IS NOT NULL
+                    GROUP BY {col_rama}
+                    ORDER BY total_empleos DESC
+                """)
+                print(f"  gold_empleo_ciiu -> P2 (Lista sumando {col_empleo} de Supercias. Rama: {col_rama})")
+            else:
+                # Si no hay columna de empleados, el conteo de empresas por sector es el estándar
+                cur.execute(f"""
+                    CREATE VIEW gold_empleo_ciiu AS
+                    SELECT 
+                        {col_rama} AS rama_ciiu,
+                        COUNT(*) AS total_empleos
+                    FROM fact_directorio_companias
+                    WHERE {col_rama} IS NOT NULL
+                    GROUP BY {col_rama}
+                    ORDER BY total_empleos DESC
+                """)
+                print(f"  gold_empleo_ciiu -> P2 (Lista contando empresas de Supercias. Rama: {col_rama})")
+        else:
+            print(f"  [DEBUG] Columnas en Supercias: {cols_dir}")
+            print("  Aviso: No se encontró columna de actividad en Supercias.")
+    else:
+        print("  Aviso: No existe fact_directorio_companias.")
+
     # -- P2: gold_vab_provincia -------------------------------------------
     if 'fact_vab_geografico' in tablas:
         cur.execute("DROP VIEW IF EXISTS gold_vab_provincia")
         cur.execute("""
-            CREATE VIEW gold_vab_provincia AS
-            WITH geo_prov AS (
-                SELECT UPPER(provincia) AS provincia_norm,
-                       MIN(id_geo)      AS id_geo
-                FROM dim_geografia
-                GROUP BY UPPER(provincia)
-            )
-            SELECT
-                v.anio,
-                gp.id_geo,
-                v.provincia AS provincia,
-                SUM(v.valor) AS vab_total
-            FROM fact_vab_geografico v
-            LEFT JOIN geo_prov gp
-                   ON UPPER(v.provincia) = gp.provincia_norm
-            GROUP BY v.anio, v.provincia, gp.id_geo
-            ORDER BY v.anio, vab_total DESC
-        """)
+                    CREATE VIEW gold_vab_provincia AS
+                    WITH geo_prov AS (SELECT UPPER(provincia) AS provincia_norm,
+                                             MIN(id_geo)      AS id_geo
+                                      FROM dim_geografia
+                                      GROUP BY UPPER(provincia))
+                    SELECT v.anio,
+                           gp.id_geo,
+                           v.provincia  AS provincia,
+                           SUM(v.valor) AS vab_total
+                    FROM fact_vab_geografico v
+                             LEFT JOIN geo_prov gp
+                                       ON UPPER(v.provincia) = gp.provincia_norm
+                    GROUP BY v.anio, v.provincia, gp.id_geo
+                    ORDER BY v.anio, vab_total DESC
+                    """)
         print("  gold_vab_provincia -> P2")
 
     # -- P3: gold_empresas_provincia --------------------------------------
@@ -252,7 +293,7 @@ def construir_vistas_gold(con):
                 GROUP BY d.provincia, g.id_geo
                 ORDER BY empresas_activas DESC
             """)
-            print("  gold_empresas_provincia -> P3 (Filtro INNER JOIN aplicado)")
+            print("  gold_empresas_provincia -> P3")
 
     # -- P3: gold_bachilleres_vs_empresas ---------------------------------
     if 'fact_mineduc_bachilleres' in tablas and 'fact_directorio_companias' in tablas:
